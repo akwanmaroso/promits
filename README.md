@@ -4,15 +4,15 @@ Pull prometheus metric and let AI to summarize your log.
 
 ### How To Run ?
 
-1. Copy .env
+1. Copy the environment file:
 
-```shell
+```bash
     cp .env.example .env
 ```
 
 2. Run
 
-```shell
+```bash
     cargo run
 ```
 
