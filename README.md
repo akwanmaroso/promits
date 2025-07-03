@@ -12,7 +12,7 @@ Pull prometheus metric and let AI to summarize your log.
 
 2. Run
 
-```
+```shell
     cargo run
 ```
 
