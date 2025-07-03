@@ -1,7 +1,10 @@
+mod config;
+
 use chrono::{Duration, Utc};
+use config::Config;
 use dotenv::dotenv;
 use indicatif::{ProgressBar, ProgressStyle};
-use inquire::Select;
+use inquire::{Select, Text};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env, time};
 
@@ -13,7 +16,8 @@ struct PromtheusResponse {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct PromtheusData {
-    resultType: String,
+    #[serde(rename = "resultType")]
+    result_type: String,
     result: Vec<PromtheusResult>,
 }
 
@@ -58,9 +62,7 @@ struct AnthropicUsage {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv().ok();
-    let promotheus_base_url = env::var("PROMOTHEUS_BASE_URL").expect("PROMOTHEUS_BASE_URL not set");
-    let anthropic_base_url = env::var("ANTHROPIC_BASE_URL").expect("ANTHROPIC_BASE_URL not set");
-    let anthropic_api_key = env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY not set");
+    let config = Config::from_env()?;
 
     let model_opts = vec![
         "claude-opus-4-20250514",
@@ -74,14 +76,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let query = "sum(irate(node_cpu_seconds_total{instance='api-prod',job='node_exporter', mode='system'}[5m])) / scalar(count(count(node_cpu_seconds_total{instance='api-prod',job='node_exporter'}) by (cpu)))";
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
 
-    let metric = fetch_metric(&promotheus_base_url, &client, query).await?;
+    let metric = fetch_metric(&config.prometheus_base_url, &client, query).await?;
 
-    let model = match Select::new("Choose model", model_opts).prompt() {
-        Ok(choice) => choice,
-        Err(_) => panic!("invalid options"),
-    };
+    let model = Select::new("Choose model", model_opts)
+        .prompt()
+        .map_err(|e| format!("Failed to select model: {}", e))?;
 
     let spinner = ProgressBar::new_spinner();
     spinner.set_message("Analyzing Log");
@@ -94,8 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spinner.enable_steady_tick(time::Duration::from_millis(100));
 
     let resp_analyze = send_message(
-        &anthropic_base_url,
-        &anthropic_api_key,
+        &config.anthropic_base_url,
+        &config.anthropic_api_key,
         &client,
         metric.data,
         model,
@@ -122,11 +125,18 @@ fn get_range_date(duration: i64) -> (i64, i64) {
 }
 
 async fn fetch_metric(
-    promotheus_base_url: &str,
+    prometheus_base_url: &str,
     client: &reqwest::Client,
     query: &str,
 ) -> Result<PromtheusResponse, Box<dyn std::error::Error>> {
-    let (start_date, end_date) = get_range_date(8);
+    let duration = Text::new("Choose duration")
+        .prompt()
+        .map_err(|e| format!("Failed to insert duration: {}", e))?
+        .parse::<i64>()
+        .unwrap_or(8);
+
+    println!("{}", duration);
+    let (start_date, end_date) = get_range_date(duration);
 
     let mut params: HashMap<&str, String> = HashMap::new();
     params.insert("start", start_date.to_string());
@@ -134,7 +144,7 @@ async fn fetch_metric(
     params.insert("query", query.to_string());
     params.insert("step", "5m".to_string());
 
-    let url = promotheus_base_url.to_string() + "/query_range";
+    let url = prometheus_base_url.to_string() + "/query_range";
     let resp = match client
         .post(url)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -157,10 +167,10 @@ async fn send_message(
     model: &str,
 ) -> Result<AnthropicBaseResponse, Box<dyn std::error::Error>> {
     let msg_parsed = serde_json::to_string_pretty(&msg)?;
-    let prompt = format!("
-        This is matric cpu from promotheus metric, please analyze the data check any anomalia, and give summarize.
-        {}
-    ", msg_parsed);
+    let prompt = format!(
+        "This is a CPU metric from Prometheus. Please analyze the data, check for any anomalies, and provide a summary.\n\nData:\n{}",
+        msg_parsed
+    );
 
     let messages = vec![MessageContent {
         role: "user".to_string(),
